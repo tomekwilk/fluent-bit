@@ -47,6 +47,9 @@ static int construct_request_buffer(struct flb_s3 *ctx, flb_sds_t new_data,
                                     struct s3_file *chunk,
                                     char **out_buf, size_t *out_size);
 
+static size_t s3_get_object_size(struct flb_s3 *ctx, const char *tag,
+                                    time_t file_first_log_time);
+
 static int s3_put_object(struct flb_s3 *ctx, const char *tag, time_t file_first_log_time,
                          char *body, size_t body_size);
 
@@ -98,6 +101,13 @@ static struct flb_aws_header storage_class_header = {
     .val_len = 0,
 };
 
+static struct flb_aws_header append_header = {
+    .key = "x-amz-write-offset-bytes",
+    .key_len = 24,
+    .val = "",
+    .val_len = 0,
+};
+
 static char *mock_error_response(char *error_env_var)
 {
     char *err_val = NULL;
@@ -137,6 +147,10 @@ int create_headers(struct flb_s3 *ctx, char *body_md5,
     int n = 0;
     int headers_len = 0;
     struct flb_aws_header *s3_headers = NULL;
+    char *tmp_offset = NULL;
+
+    /* TODO: remove */
+     flb_plg_debug(ctx->ins, "create_headers");
 
     if (ctx->content_type != NULL) {
         headers_len++;
@@ -151,6 +165,9 @@ int create_headers(struct flb_s3 *ctx, char *body_md5,
         headers_len++;
     }
     if (ctx->storage_class != NULL) {
+        headers_len++;
+    }
+    if (ctx->use_append == FLB_TRUE && ctx->offset) {
         headers_len++;
     }
     if (headers_len == 0) {
@@ -191,6 +208,25 @@ int create_headers(struct flb_s3 *ctx, char *body_md5,
         s3_headers[n] = storage_class_header;
         s3_headers[n].val = ctx->storage_class;
         s3_headers[n].val_len = strlen(ctx->storage_class);
+        n++;
+    }
+    if (ctx->use_append == FLB_TRUE && ctx->offset) {
+        flb_plg_debug(ctx->ins, "adding offset header: %ld", ctx->offset);
+
+        tmp_offset = flb_calloc(64, sizeof(char));
+        sprintf(tmp_offset, "%ld", ctx->offset);
+        if (!tmp_offset) {
+            flb_errno();
+            return -1;
+        }
+        flb_plg_debug(ctx->ins, "create_headers: offset = %ld, %s", ctx->offset, tmp_offset);
+
+        s3_headers[n] = append_header;
+        s3_headers[n].val = tmp_offset;
+        s3_headers[n].val_len = strlen(tmp_offset);
+    } else {
+        /* TODO: remove */
+        flb_plg_debug(ctx->ins, "create_headers: skipping append header");
     }
 
     *num_headers = headers_len;
@@ -710,6 +746,14 @@ static int cb_s3_init(struct flb_output_instance *ins,
         }
     }
 
+    if (ctx->use_append == FLB_TRUE) {
+        flb_plg_debug(ctx->ins, "use_append ON"); /* TODO: remove */
+        if (ctx->use_put_object == FLB_FALSE) {
+            flb_plg_error(ctx->ins, "use_append requires use_put_object to be enabled");
+            return -1;
+        }
+    }
+
     tmp = flb_output_get_property("endpoint", ins);
     if (tmp) {
         ctx->insecure = strncmp(tmp, "http://", 7) == 0 ? FLB_TRUE : FLB_FALSE;
@@ -1064,9 +1108,24 @@ static int upload_data(struct flb_s3 *ctx, struct s3_file *chunk,
 
 put_object:
 
+    if (ctx->use_append) {
+        /* TODO: remove */
+        flb_plg_debug(ctx->ins, "put_object: use_append");
+        /* discover object size */
+        size_t offset = s3_get_object_size(ctx, tag, file_first_log_time);
+        if (offset == -1) {
+            flb_plg_error(ctx->ins, "Failed to discover object size");
+            ctx->offset = 0;
+        } else {
+            ctx->offset = offset;
+        }
+    }
     /*
      * remove chunk from buffer list
      */
+    /* TODO: remove */
+    flb_plg_debug(ctx->ins, "calling s3_put_object");
+
     ret = s3_put_object(ctx, tag, file_first_log_time, body, body_size);
     if (ctx->compression == FLB_AWS_COMPRESS_GZIP) {
         flb_free(payload_buf);
@@ -1318,6 +1377,93 @@ static int construct_request_buffer(struct flb_s3 *ctx, flb_sds_t new_data,
     *out_size = body_size;
 
     return 0;
+}
+
+static size_t s3_get_object_size(struct flb_s3 *ctx, const char *tag, time_t file_first_log_time) {
+    struct flb_http_client *c = NULL;
+    struct flb_aws_client *s3_client;
+    struct flb_aws_header *headers = NULL;
+    flb_sds_t s3_key;
+    flb_sds_t tmp;
+    flb_sds_t uri;
+    int len;
+    int ret;
+    int num_headers = 0;
+    int obj_size = 0;
+
+    /* TODO: remove */
+    flb_plg_debug(ctx->ins, "s3_get_object_size");
+
+    s3_key = flb_get_s3_key(ctx->s3_key_format, file_first_log_time, tag,
+                            ctx->tag_delimiters, ctx->seq_index);
+    if (!s3_key) {
+        flb_plg_error(ctx->ins, "Failed to construct S3 Object Key for %s", tag);
+        return -1;
+    }
+
+    len = strlen(s3_key);
+    len += strlen(ctx->bucket + 1);
+
+    uri = flb_sds_create_size(len);
+    if (!uri) {
+        flb_errno();
+        return -1;
+    }
+
+    tmp = flb_sds_printf(&uri, "/%s%s", ctx->bucket, s3_key);
+    if (!tmp) {
+        flb_sds_destroy(uri);
+        flb_plg_error(ctx->ins, "Failed to create PutObject URI");
+        return -1;
+    }
+
+    flb_sds_destroy(s3_key);
+    uri = tmp;
+
+    /* TODO: remove */
+    flb_plg_debug(ctx->ins, "s3_get_object_size uri=%s", uri);
+
+    // /* Update file and increment index value right before request */
+    // if (ctx->key_fmt_has_seq_index) {
+    //     ctx->seq_index++;
+
+    //     ret = write_seq_index(ctx->seq_index_file, ctx->seq_index);
+    //     if (ret < 0 && access(ctx->seq_index_file, F_OK) == 0) {
+    //         ctx->seq_index--;
+    //         flb_plg_error(ctx->ins, "Failed to update sequential index metadata file");
+    //         return -1;
+    //     }
+    // }
+
+    s3_client = ctx->s3_client;
+    ret = create_headers(ctx, NULL, &headers, &num_headers, FLB_FALSE);
+    if (ret == -1) {
+        flb_plg_error(ctx->ins, "Failed to create headers");
+        flb_sds_destroy(uri);
+        return -1;
+    }
+    c = s3_client->client_vtable->request(s3_client, FLB_HTTP_HEAD,
+                                            uri, NULL, 0, headers, num_headers);
+    if (headers) {
+        flb_free(headers);
+    }
+    flb_sds_destroy(uri);
+
+    if (c->resp.status == 200) {
+        flb_plg_info(ctx->ins, "Successfully discovered object size "
+                     "for %s (%s)", s3_key, tmp);
+
+        if (c->resp.data != NULL) {
+            flb_plg_debug(ctx->ins, "s3_get_object_size resp.data==%d", c->resp.content_length);
+            obj_size = c->resp.content_length;
+        } else {
+            flb_plg_debug(ctx->ins, "s3_get_object_size resp.data==NULL");
+        }
+    }
+
+    flb_http_client_destroy(c);
+
+    return obj_size;
 }
 
 static int s3_put_object(struct flb_s3 *ctx, const char *tag, time_t file_first_log_time,
@@ -2436,6 +2582,12 @@ static struct flb_config_map config_map[] = {
      FLB_CONFIG_MAP_BOOL, "use_put_object", "false",
      0, FLB_TRUE, offsetof(struct flb_s3, use_put_object),
      "Use the S3 PutObject API, instead of the multipart upload API"
+    },
+
+    {
+     FLB_CONFIG_MAP_BOOL, "use_append", "false",
+     0, FLB_TRUE, offsetof(struct flb_s3, use_append),
+     "Append data to S3 objects, requires S3 Express One Zone"
     },
 
     {

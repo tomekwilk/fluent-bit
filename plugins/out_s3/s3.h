@@ -43,7 +43,7 @@
 #define MAX_FILE_SIZE_STR     "50,000,000,000"
 
 /* Allowed max file size 1 GB for publishing to S3 */
-#define MAX_FILE_SIZE_PUT_OBJECT        1000000000 
+#define MAX_FILE_SIZE_PUT_OBJECT        1000000000
 
 #define DEFAULT_UPLOAD_TIMEOUT 3600
 
@@ -116,6 +116,7 @@ struct flb_s3 {
     int free_endpoint;
     int retry_requests;
     int use_put_object;
+    int use_append;
     int send_content_md5;
     int static_file_path;
     int compression;
@@ -125,6 +126,9 @@ struct flb_s3 {
 
     /* track the total amount of buffered data */
     size_t current_buffer_size;
+
+    /* holds object size when use_append is enabled */
+    size_t offset;
 
     struct flb_aws_provider *provider;
     struct flb_aws_provider *base_provider;
