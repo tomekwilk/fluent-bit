@@ -131,6 +131,15 @@ void flb_engine_reschedule_retries(struct flb_config *config)
         ins = mk_list_entry(head, struct flb_input_instance, _head);
         mk_list_foreach_safe(t_head, tmp_task, &ins->tasks) {
             task = mk_list_entry(t_head, struct flb_task, _head);
+
+            if (task->users > 0) {
+                flb_debug("[engine] retry=%p for task %i already scheduled to run, "
+                          "not re-scheduling it.",
+                          retry, task->id);
+
+                continue;
+            }
+
             mk_list_foreach_safe(rt_head, tmp_retry_task, &task->retries) {
                 retry = mk_list_entry(rt_head, struct flb_task_retry, _head);
                 flb_sched_request_invalidate(config, retry);
@@ -190,7 +199,7 @@ static inline int handle_input_event(flb_pipefd_t fd, uint64_t ts,
 
     bytes = flb_pipe_r(fd, &val, sizeof(val));
     if (bytes == -1) {
-        flb_errno();
+        flb_pipe_error();
         return -1;
     }
 
@@ -273,7 +282,7 @@ static inline int handle_output_event(uint64_t ts,
               task_id, out_id, trace_st);
 #endif
 
-    task = config->tasks_map[task_id].task;
+    task = config->task_map[task_id].task;
     ins  = flb_output_get_instance(config, out_id);
     if (flb_output_is_threaded(ins) == FLB_FALSE) {
         flb_output_flush_finished(config, out_id);
@@ -484,7 +493,7 @@ static inline int handle_output_events(flb_pipefd_t fd,
     bytes = flb_pipe_r(fd, &values, sizeof(values));
 
     if (bytes == -1) {
-        flb_errno();
+        flb_pipe_error();
         return -1;
     }
 
@@ -525,7 +534,7 @@ static inline int flb_engine_manager(flb_pipefd_t fd, struct flb_config *config)
     /* read the event */
     bytes = flb_pipe_r(fd, &val, sizeof(val));
     if (bytes == -1) {
-        flb_errno();
+        flb_pipe_error();
         return -1;
     }
 
@@ -754,6 +763,9 @@ int flb_engine_start(struct flb_config *config)
     flb_info("[fluent bit] version=%s, commit=%.10s, pid=%i",
              FLB_VERSION_STR, FLB_GIT_HASH, getpid());
 
+#ifdef FLB_SYSTEM_WINDOWS
+    flb_debug("[engine] maxstdio set: %d", _getmaxstdio());
+#endif
     /* Debug coroutine stack size */
     flb_utils_bytes_to_human_readable_size(config->coro_stack_size,
                                            tmp, sizeof(tmp));
@@ -786,6 +798,20 @@ int flb_engine_start(struct flb_config *config)
 
     config->notification_channels_initialized = FLB_TRUE;
     config->notification_event.type = FLB_ENGINE_EV_NOTIFICATION;
+
+    ret = flb_routes_mask_set_size(mk_list_size(&config->outputs), config);
+
+    if (ret != 0) {
+        flb_error("[engine] routing mask dimensioning failed");
+        return -1;
+    }
+
+    ret = flb_routes_mask_set_size(mk_list_size(&config->outputs), config);
+
+    if (ret != 0) {
+        flb_error("[engine] routing mask dimensioning failed");
+        return -1;
+    }
 
     /* Initialize custom plugins */
     ret = flb_custom_init_all(config);
@@ -1049,7 +1075,7 @@ int flb_engine_start(struct flb_config *config)
                 /* Read the coroutine reference */
                 ret = flb_pipe_r(event->fd, &output_flush, sizeof(struct flb_output_flush *));
                 if (ret <= 0 || output_flush == 0) {
-                    flb_errno();
+                    flb_pipe_error();
                     continue;
                 }
 

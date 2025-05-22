@@ -73,6 +73,7 @@ if (FLB_CUSTOM_CALYPTIA)
         "custom_calyptia_test.c"
         "custom_calyptia_registration_retry_test.c"
         "custom_calyptia_input_test.c"
+        "in_calyptia_fleet_test.c"
     )
 
     foreach(TEST_SOURCE ${CALYPTIA_TESTS})
@@ -82,6 +83,7 @@ if (FLB_CUSTOM_CALYPTIA)
         add_executable(${TEST_TARGET}
             ${TEST_SOURCE}
             "../../plugins/custom_calyptia/calyptia.c"
+            "../../plugins/in_calyptia_fleet/in_calyptia_fleet.c"
         )
 
         target_link_libraries(${TEST_TARGET}
@@ -113,7 +115,7 @@ if(FLB_IN_EBPF)
     # Function to create eBPF handler tests
     function(add_ebpf_handler_test name source_file handler_file)
         set(TEST_TARGET "flb-rt-in_ebpf_${name}_handler")
-        
+
         # Add executable
         add_executable(${TEST_TARGET}
             ${source_file}
@@ -195,8 +197,10 @@ endif()
 if(FLB_IN_LIB)
   FLB_RT_TEST(FLB_OUT_LIB              "core_engine.c")
   FLB_RT_TEST(FLB_OUT_LIB              "core_log.c")
+  FLB_RT_TEST(FLB_OUT_LIB              "core_routes.c")
   FLB_RT_TEST(FLB_OUT_LIB              "config_map_opts.c")
   FLB_RT_TEST(FLB_OUT_COUNTER          "out_counter.c")
+  FLB_RT_TEST(FLB_OUT_AZURE_KUSTO      "out_azure_kusto.c")
   FLB_RT_TEST(FLB_OUT_DATADOG          "out_datadog.c")
   FLB_RT_TEST(FLB_OUT_SKYWALKING       "out_skywalking.c")
   FLB_RT_TEST(FLB_OUT_ES               "out_elasticsearch.c")
@@ -235,6 +239,10 @@ endif()
 
 if (FLB_PROCESSOR_METRICS_SELECTOR)
   FLB_RT_TEST(FLB_PROCESSOR_METRICS_SELECTOR "processor_metrics_selector.c")
+endif()
+
+if (FLB_PROCESSOR_LABELS)
+  FLB_RT_TEST(FLB_PROCESSOR_LABELS "processor_labels.c")
 endif()
 
 if (FLB_PROCESSOR_CONTENT_MODIFIER)

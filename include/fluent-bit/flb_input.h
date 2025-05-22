@@ -25,6 +25,8 @@
 #include <fluent-bit/flb_coro.h>
 #include <fluent-bit/flb_config.h>
 #include <fluent-bit/flb_network.h>
+#include <fluent-bit/flb_downstream.h>
+#include <fluent-bit/flb_upstream.h>
 #include <fluent-bit/flb_mem.h>
 #include <fluent-bit/flb_str.h>
 #include <fluent-bit/flb_bits.h>
@@ -39,6 +41,7 @@
 #include <fluent-bit/flb_input_log.h>
 #include <fluent-bit/flb_input_metric.h>
 #include <fluent-bit/flb_input_trace.h>
+#include <fluent-bit/flb_input_profiles.h>
 #include <fluent-bit/flb_config_format.h>
 #include <fluent-bit/flb_processor.h>
 
@@ -429,6 +432,7 @@ struct flb_input_instance {
     struct flb_hash_table *ht_log_chunks;
     struct flb_hash_table *ht_metric_chunks;
     struct flb_hash_table *ht_trace_chunks;
+    struct flb_hash_table *ht_profile_chunks;
 
     /* TLS settings */
     int use_tls;                         /* bool, try to use TLS for I/O */
@@ -441,6 +445,9 @@ struct flb_input_instance {
     char *tls_crt_file;                  /* Certificate                  */
     char *tls_key_file;                  /* Cert Key                     */
     char *tls_key_passwd;                /* Cert Key Password            */
+    char *tls_min_version;               /* Minimum protocol version of TLS */
+    char *tls_max_version;               /* Maximum protocol version of TLS */
+    char *tls_ciphers;                   /* TLS ciphers */
 
     struct mk_list *tls_config_map;
 
@@ -669,7 +676,7 @@ static FLB_INLINE void flb_input_return(struct flb_coro *coro) {
     val = FLB_BITS_U64_SET(FLB_ENGINE_IN_CORO, ins->id);
     n = flb_pipe_w(ins->ch_events[1], (void *) &val, sizeof(val));
     if (n == -1) {
-        flb_errno();
+        flb_pipe_error();
     }
 
     flb_input_coro_prepare_destroy(input_coro);
@@ -725,6 +732,8 @@ static inline int flb_input_config_map_set(struct flb_input_instance *ins,
 
     return ret;
 }
+
+struct mk_list *flb_input_get_global_config_map(struct flb_config *config);
 
 int flb_input_register_all(struct flb_config *config);
 struct flb_input_instance *flb_input_new(struct flb_config *config,

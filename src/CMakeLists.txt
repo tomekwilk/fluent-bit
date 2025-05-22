@@ -28,6 +28,7 @@ set(src
   flb_input_log.c
   flb_input_metric.c
   flb_input_trace.c
+  flb_input_profiles.c
   flb_input_blob.c
   flb_input_thread.c
   flb_filter.c
@@ -63,6 +64,7 @@ set(src
   flb_plugin.c
   flb_gzip.c
   flb_snappy.c
+  flb_zstd.c
   flb_compression.c
   flb_http_common.c
   flb_http_client_http1.c
@@ -198,7 +200,7 @@ if(FLB_LUAJIT)
     )
 endif()
 
-if(FLB_IN_KAFKA OR FLB_OUT_KAFKA)
+if(FLB_KAFKA)
   set(src
     ${src}
     "flb_kafka.c"
@@ -243,7 +245,7 @@ if(FLB_SQLDB)
     )
   set(extra_libs
     ${extra_libs}
-    "sqlite3")
+    ${SQLITE_LIBRARIES})
 endif()
 
 if(FLB_STATIC_CONF)
@@ -343,6 +345,14 @@ if(FLB_WASM)
   add_subdirectory(wasm)
 endif()
 
+if(FLB_UNICODE_ENCODER)
+  add_subdirectory(simdutf)
+  set(src
+    ${src}
+    "flb_unicode.c"
+    )
+endif()
+
 # WAMRC compiler
 if(FLB_WAMRC)
   add_subdirectory(wamrc)
@@ -382,10 +392,11 @@ set(FLB_DEPS
   ctraces-static
   mk_core
   jsmn
-  msgpack-c-static
+  ${MSGPACK_LIBRARIES}
   mpack-static
   chunkio-static
   miniz
+  ${LIBZSTD_LIBRARIES}
 
   ${FLB_PLUGINS}
   ${FLB_PROXY_PLUGINS}
@@ -416,6 +427,15 @@ if(FLB_UTF8_ENCODER)
 set(FLB_DEPS
   ${FLB_DEPS}
   tutf8e
+  )
+endif()
+
+# Unicode Encoding (UTF-16LE, UTF-16BE)
+if(FLB_UNICODE_ENCODER)
+set(FLB_DEPS
+  ${FLB_DEPS}
+  simdutf-static
+  flb-simdutf-connector-static
   )
 endif()
 
@@ -508,6 +528,11 @@ if(FLB_BINARY)
     add_dependencies(fluent-bit-bin flb-static-conf)
   endif()
 
+  # in_ebpf
+  if(FLB_IN_EBPF)
+    add_dependencies(fluent-bit-bin flb-ebpf-generate_skeletons)
+  endif()
+
   if(FLB_REGEX)
     target_link_libraries(fluent-bit-bin onigmo-static)
   endif()
@@ -545,13 +570,30 @@ if(FLB_BINARY)
   endif()
 
   if(SYSTEMD_UNITDIR)
-    set(FLB_SYSTEMD_SCRIPT "${PROJECT_SOURCE_DIR}/init/${FLB_OUT_NAME}.service")
-    configure_file(
-      "${PROJECT_SOURCE_DIR}/init/systemd.in"
-      ${FLB_SYSTEMD_SCRIPT}
-      )
-    install(FILES ${FLB_SYSTEMD_SCRIPT} COMPONENT binary DESTINATION ${SYSTEMD_UNITDIR})
-    install(DIRECTORY DESTINATION ${FLB_INSTALL_CONFDIR} COMPONENT binary)
+    if (FLB_AMAZON_LINUX2)
+      set(FLB_SYSTEMD_SCRIPT "${PROJECT_SOURCE_DIR}/init/${FLB_OUT_NAME}.service")
+      configure_file(
+        "${PROJECT_SOURCE_DIR}/init/az2-systemd.in"
+        ${FLB_SYSTEMD_SCRIPT}
+        )
+      install(FILES ${FLB_SYSTEMD_SCRIPT} COMPONENT binary DESTINATION ${SYSTEMD_UNITDIR})
+      install(DIRECTORY DESTINATION ${FLB_INSTALL_CONFDIR} COMPONENT binary)
+      set(FLB_HOSTNAME_SYSTEMD_SCRIPT "${PROJECT_SOURCE_DIR}/init/sethostname.service")
+      configure_file(
+        "${PROJECT_SOURCE_DIR}/init/az2-sethostname.in"
+        ${FLB_HOSTNAME_SYSTEMD_SCRIPT}
+        )
+      install(FILES ${FLB_HOSTNAME_SYSTEMD_SCRIPT} COMPONENT binary DESTINATION ${SYSTEMD_UNITDIR})
+      install(DIRECTORY DESTINATION ${FLB_INSTALL_CONFDIR} COMPONENT binary)
+    else()
+      set(FLB_SYSTEMD_SCRIPT "${PROJECT_SOURCE_DIR}/init/${FLB_OUT_NAME}.service")
+      configure_file(
+        "${PROJECT_SOURCE_DIR}/init/systemd.in"
+        ${FLB_SYSTEMD_SCRIPT}
+        )
+      install(FILES ${FLB_SYSTEMD_SCRIPT} COMPONENT binary DESTINATION ${SYSTEMD_UNITDIR})
+      install(DIRECTORY DESTINATION ${FLB_INSTALL_CONFDIR} COMPONENT binary)
+    endif()
   elseif(IS_DIRECTORY /usr/share/upstart)
     set(FLB_UPSTART_SCRIPT "${PROJECT_SOURCE_DIR}/init/${FLB_OUT_NAME}.conf")
     configure_file(

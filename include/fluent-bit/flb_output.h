@@ -60,6 +60,11 @@
 #include <ctraces/ctr_encode_msgpack.h>
 #include <ctraces/ctr_mpack_utils_defs.h>
 
+#include <cprofiles/cprofiles.h>
+#include <cprofiles/cprof_decode_msgpack.h>
+#include <cprofiles/cprof_encode_msgpack.h>
+#include <cprofiles/cprof_mpack_utils_defs.h>
+
 #ifdef FLB_HAVE_REGEX
 #include <fluent-bit/flb_regex.h>
 #endif
@@ -90,6 +95,7 @@ int flb_chunk_trace_output(struct flb_chunk_trace *trace, struct flb_output_inst
 #define FLB_OUTPUT_METRICS     2
 #define FLB_OUTPUT_TRACES      4
 #define FLB_OUTPUT_BLOBS       8
+#define FLB_OUTPUT_PROFILES    16
 
 #define FLB_OUTPUT_FLUSH_COMPAT_OLD_18()                 \
     const void *data   = event_chunk->data;              \
@@ -360,6 +366,9 @@ struct flb_output_instance {
     char *tls_crt_file;                  /* Certificate                  */
     char *tls_key_file;                  /* Cert Key                     */
     char *tls_key_passwd;                /* Cert Key Password            */
+    char *tls_min_version;               /* Minimum protocol version of TLS */
+    char *tls_max_version;               /* Maximum protocol version of TLS */
+    char *tls_ciphers;                   /* TLS ciphers */
 #endif
 
     /*
@@ -702,10 +711,12 @@ struct flb_output_flush *flb_output_flush_create(struct flb_task *task,
     struct flb_event_chunk *tmp;
     char *resized_serialization_buffer;
     size_t serialization_buffer_offset;
+    cfl_sds_t serialized_profiles_context_buffer;
     char *serialized_context_buffer;
     size_t serialized_context_size;
     struct cmt *metrics_context;
     struct ctrace *trace_context;
+    struct cprof *profile_context;
     size_t chunk_offset;
     struct cmt *cmt_out_context = NULL;
 
@@ -713,6 +724,7 @@ struct flb_output_flush *flb_output_flush_create(struct flb_task *task,
     out_flush = (struct flb_output_flush *) flb_calloc(1, sizeof(struct flb_output_flush));
     if (!out_flush) {
         flb_errno();
+
         return NULL;
     }
 
@@ -766,6 +778,8 @@ struct flb_output_flush *flb_output_flush_create(struct flb_task *task,
             p_buf = flb_calloc(evc->size * 2, sizeof(char));
 
             if (p_buf == NULL) {
+                flb_errno();
+
                 flb_coro_destroy(coro);
                 flb_free(out_flush);
 
@@ -825,6 +839,8 @@ struct flb_output_flush *flb_output_flush_create(struct flb_task *task,
                             flb_realloc(p_buf, p_size + serialized_context_size);
 
                         if (resized_serialization_buffer == NULL) {
+                            flb_errno();
+
                             cmt_encode_msgpack_destroy(serialized_context_buffer);
                             flb_coro_destroy(coro);
                             flb_free(out_flush);
@@ -875,6 +891,8 @@ struct flb_output_flush *flb_output_flush_create(struct flb_task *task,
             p_buf = flb_calloc(evc->size * 2, sizeof(char));
 
             if (p_buf == NULL) {
+                flb_errno();
+
                 flb_coro_destroy(coro);
                 flb_free(out_flush);
 
@@ -922,6 +940,8 @@ struct flb_output_flush *flb_output_flush_create(struct flb_task *task,
                             flb_realloc(p_buf, p_size + serialized_context_size);
 
                         if (resized_serialization_buffer == NULL) {
+                            flb_errno();
+
                             ctr_encode_msgpack_destroy(serialized_context_buffer);
                             flb_coro_destroy(coro);
                             flb_free(out_flush);
@@ -941,6 +961,106 @@ struct flb_output_flush *flb_output_flush_create(struct flb_task *task,
                     serialization_buffer_offset += serialized_context_size;
 
                     ctr_encode_msgpack_destroy(serialized_context_buffer);
+                }
+            }
+
+            if (serialization_buffer_offset == 0) {
+                flb_coro_destroy(coro);
+                flb_free(out_flush);
+                flb_free(p_buf);
+
+                return NULL;
+            }
+
+            out_flush->processed_event_chunk = flb_event_chunk_create(
+                                                evc->type,
+                                                0,
+                                                evc->tag,
+                                                flb_sds_len(evc->tag),
+                                                p_buf,
+                                                p_size);
+
+            if (out_flush->processed_event_chunk == NULL) {
+                flb_coro_destroy(coro);
+                flb_free(out_flush);
+                flb_free(p_buf);
+
+                return NULL;
+            }
+        }
+        else if (evc->type == FLB_EVENT_TYPE_PROFILES) {
+            p_buf = flb_calloc(evc->size * 2, sizeof(char));
+
+            if (p_buf == NULL) {
+                flb_errno();
+
+                flb_coro_destroy(coro);
+                flb_free(out_flush);
+
+                return NULL;
+            }
+
+            p_size = evc->size;
+
+            chunk_offset = 0;
+            serialization_buffer_offset = 0;
+
+            while ((ret = cprof_decode_msgpack_create(
+                            &profile_context,
+                            (unsigned char *) evc->data,
+                            evc->size,
+                            &chunk_offset)) == CPROF_DECODE_MSGPACK_SUCCESS) {
+                ret = flb_processor_run(o_ins->processor,
+                                        0,
+                                        FLB_PROCESSOR_PROFILES,
+                                        evc->tag,
+                                        flb_sds_len(evc->tag),
+                                        (char *) profile_context,
+                                        0,
+                                        NULL,
+                                        NULL);
+
+                if (ret == 0) {
+                    ret = cprof_encode_msgpack_create(&serialized_profiles_context_buffer,
+                                                      profile_context);
+
+                    cprof_destroy(profile_context);
+
+                    if (ret != 0) {
+                        flb_coro_destroy(coro);
+                        flb_free(out_flush);
+                        flb_free(p_buf);
+
+                        return NULL;
+                    }
+
+                    if ((serialization_buffer_offset +
+                         cfl_sds_len(serialized_profiles_context_buffer)) > p_size) {
+                        resized_serialization_buffer = \
+                            flb_realloc(p_buf, p_size + cfl_sds_len(serialized_profiles_context_buffer));
+
+                        if (resized_serialization_buffer == NULL) {
+                            flb_errno();
+
+                            cprof_encode_msgpack_destroy(serialized_profiles_context_buffer);
+                            flb_coro_destroy(coro);
+                            flb_free(out_flush);
+                            flb_free(p_buf);
+
+                            return NULL;
+                        }
+
+                        p_size += cfl_sds_len(serialized_profiles_context_buffer);
+                        p_buf = resized_serialization_buffer;
+                    }
+
+                    memcpy(&(((char *) p_buf)[serialization_buffer_offset]),
+                           serialized_profiles_context_buffer,
+                           cfl_sds_len(serialized_profiles_context_buffer));
+
+                    serialization_buffer_offset += cfl_sds_len(serialized_profiles_context_buffer);
+
+                    cprof_encode_msgpack_destroy(serialized_profiles_context_buffer);
                 }
             }
 
@@ -1082,7 +1202,7 @@ static inline void flb_output_return(int ret, struct flb_coro *co) {
     /* Notify the event loop about our return status */
     n = flb_pipe_w(pipe_fd, (void *) &val, sizeof(val));
     if (n == -1) {
-        flb_errno();
+        flb_pipe_error();
     }
 
     /*
@@ -1201,5 +1321,7 @@ int flb_output_set_http_debug_callbacks(struct flb_output_instance *ins);
 int flb_output_task_flush(struct flb_task *task,
                           struct flb_output_instance *out_ins,
                           struct flb_config *config);
+
+struct mk_list *flb_output_get_global_config_map(struct flb_config *config);
 
 #endif

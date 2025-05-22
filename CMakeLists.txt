@@ -8,7 +8,7 @@ set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
 # Fluent Bit Version
 set(FLB_VERSION_MAJOR  4)
 set(FLB_VERSION_MINOR  0)
-set(FLB_VERSION_PATCH  0)
+set(FLB_VERSION_PATCH  3)
 set(FLB_VERSION_STR "${FLB_VERSION_MAJOR}.${FLB_VERSION_MINOR}.${FLB_VERSION_PATCH}")
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -33,6 +33,24 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
   if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)")
     set(FLB_LINUX_ON_AARCH64 On)
     add_definitions(-DFLB_LINUX_ON_AARCH64)
+  endif()
+
+  find_program(CAT_EXEC cat)
+  if (CAT_EXEC)
+    set(RELEASE_FILE "/etc/system-release")
+    if (EXISTS ${RELEASE_FILE})
+      execute_process(COMMAND ${CAT_EXEC} ${RELEASE_FILE}
+        OUTPUT_VARIABLE CAT_SYSTEM_RELEASE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+
+      message(STATUS "##### cat /etc/system-release -- OK")
+
+      if (CAT_SYSTEM_RELEASE STREQUAL "Amazon Linux release 2 (Karoo)")
+        set(FLB_AMAZON_LINUX2 On)
+        add_definitions(-DFLB_AMAZON_LINUX2)
+      endif()
+    endif()
   endif()
 endif()
 
@@ -102,6 +120,19 @@ include(cmake/platform_feature_checks.cmake)
 set(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/sanitizers-cmake/cmake" ${CMAKE_MODULE_PATH})
 find_package(Sanitizers)
 
+# Check for CXX support
+include(CheckLanguage)
+check_language(CXX)
+
+# Enable CXX features if CXX is available
+if(CMAKE_CXX_COMPILER)
+  message(STATUS "CXX compiler found, enable simdutf.")
+  set(FLB_USE_SIMDUTF Yes)
+else()
+  message(STATUS "CXX compiler not found, disable simdutf.")
+  set(FLB_USE_SIMDUTF No)
+endif()
+
 # Output paths
 set(FLB_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
@@ -121,6 +152,7 @@ option(FLB_COVERAGE            "Build with code-coverage"      No)
 option(FLB_JEMALLOC            "Build with Jemalloc support"   No)
 option(FLB_REGEX               "Build with Regex support"     Yes)
 option(FLB_UTF8_ENCODER        "Build with UTF8 encoding support" Yes)
+option(FLB_UNICODE_ENCODER     "Build with Unicode (UTF-16LE, UTF-16BE) encoding support" ${FLB_USE_SIMDUTF})
 option(FLB_PARSER              "Build with Parser support"    Yes)
 option(FLB_TLS                 "Build with SSL/TLS support"   Yes)
 option(FLB_BINARY              "Build executable binary"      Yes)
@@ -155,6 +187,8 @@ option(FLB_WASM                "Build with WASM runtime support"            Yes)
 option(FLB_WAMRC               "Build with WASM AOT compiler executable"    No)
 option(FLB_WASM_STACK_PROTECT  "Build with WASM runtime with strong stack protector flags" No)
 option(FLB_ENFORCE_ALIGNMENT   "Enable limited platform specific aligned memory access" No)
+option(FLB_KAFKA               "Enable Kafka support"         Yes)
+option(FLB_ZIG                 "Enable zig integration"       Yes)
 
 # Native Metrics Support (cmetrics)
 option(FLB_METRICS             "Enable metrics support"       Yes)
@@ -215,7 +249,10 @@ option(FLB_PREFER_SYSTEM_LIB_CARES        "Prefer the libcares system library"  
 option(FLB_PREFER_SYSTEM_LIB_JEMALLOC     "Prefer the libjemalloc system library"     ${FLB_PREFER_SYSTEM_LIBS})
 option(FLB_PREFER_SYSTEM_LIB_KAFKA        "Prefer the libkafka system library"        ${FLB_PREFER_SYSTEM_LIBS})
 option(FLB_PREFER_SYSTEM_LIB_LUAJIT       "Prefer the libluajit system library"       ${FLB_PREFER_SYSTEM_LIBS})
+option(FLB_PREFER_SYSTEM_LIB_MSGPACK      "Prefer the libmsgpack system library"      ${FLB_PREFER_SYSTEM_LIBS})
 option(FLB_PREFER_SYSTEM_LIB_NGHTTP2      "Prefer the libnghttp2 system library"      ${FLB_PREFER_SYSTEM_LIBS})
+option(FLB_PREFER_SYSTEM_LIB_SQLITE       "Prefer the libsqlite3 system library"      ${FLB_PREFER_SYSTEM_LIBS})
+option(FLB_PREFER_SYSTEM_LIB_ZSTD         "Prefer the libzstd system library"         ${FLB_PREFER_SYSTEM_LIBS})
 
 # Enable all features
 if(FLB_ALL)
@@ -264,6 +301,7 @@ if(FLB_DEV)
 
   set(FLB_DEBUG             On)
   set(FLB_TRACE             On)
+  set(FLB_OUT_ZIG_DEMO      On)
   set(FLB_CHUNK_TRACE       On)
   set(FLB_METRICS           On)
   set(FLB_PROFILES          On)
@@ -353,6 +391,27 @@ if(FLEX_FOUND AND BISON_FOUND)
   set(FLB_FLEX_BISON  1)
 endif()
 
+find_program(ZIG_PATH zig)
+
+# Enable zig only when the appropriate toolchain is available
+if (FLB_ZIG)
+  set(FLB_ZIG Off)
+
+  if (ZIG_PATH)
+    execute_process(
+        COMMAND ${ZIG_PATH} version
+        OUTPUT_VARIABLE COMMAND_OUTPUT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+
+    # This is not great, improvements would be appreciated
+    if (COMMAND_OUTPUT STREQUAL "0.14.0")
+      FLB_DEFINITION(FLB_HAVE_ZIG)
+      set(FLB_ZIG On)
+    endif()
+  endif()
+endif()
+
 if(FLB_SMALL)
   if(CMAKE_COMPILER_IS_GNUCC)
     set(strip_flag  " -s ")
@@ -364,6 +423,9 @@ endif()
 
 if(FLB_COVERAGE)
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O0 --coverage -fprofile-arcs -ftest-coverage")
+  if (FLB_UNICODE_ENCODER)
+    set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -g -O0 --coverage -fprofile-arcs -ftest-coverage")
+  endif()
   set(CMAKE_BUILD_TYPE "Debug")
 endif()
 
@@ -472,11 +534,16 @@ FLB_OPTION(FLUENT_PROTO_PROFILES ON)
 add_subdirectory(${FLB_PATH_LIB_FLUENT_OTEL} EXCLUDE_FROM_ALL)
 
 # MsgPack options
-option(MSGPACK_ENABLE_CXX             OFF)
-option(MSGPACK_ENABLE_SHARED          OFF)
-option(MSGPACK_BUILD_TESTS            OFF)
-option(MSGPACK_BUILD_EXAMPLES         OFF)
-add_subdirectory(${FLB_PATH_LIB_MSGPACK} EXCLUDE_FROM_ALL)
+if(FLB_PREFER_SYSTEM_LIB_MSGPACK)
+  find_package(PkgConfig)
+  pkg_check_modules(MSGPACK msgpack>=4.0.0)
+endif()
+if(MSGPACK_FOUND)
+  include_directories(${MSGPACK_INCLUDE_DIRS})
+  link_directories(${MSGPACK_LIBRARY_DIRS})
+else()
+  include(cmake/msgpack.cmake)
+endif()
 
 # MPack
 add_definitions(-DMPACK_EXTENSIONS=1)
@@ -484,6 +551,18 @@ add_subdirectory(${FLB_PATH_LIB_MPACK} EXCLUDE_FROM_ALL)
 
 # Miniz (zip)
 add_subdirectory(${FLB_PATH_LIB_MINIZ} EXCLUDE_FROM_ALL)
+
+# Zstd (zstd)
+if(FLB_PREFER_SYSTEM_LIB_ZSTD)
+  find_package(PkgConfig)
+  pkg_check_modules(LIBZSTD libzstd>=1.4.8)
+endif()
+if(LIBZSTD_FOUND)
+  include_directories(${LIBZSTD_INCLUDE_DIRS})
+  link_directories(${LIBZSTD_LIBRARY_DIRS})
+else()
+  include(cmake/zstd.cmake)
+endif()
 
 # ring buffer library
 add_subdirectory(${FLB_PATH_LIB_RING_BUFFER} EXCLUDE_FROM_ALL)
@@ -504,6 +583,14 @@ endif()
 # tutf8e
 if(FLB_UTF8_ENCODER)
   add_subdirectory(${FLB_PATH_LIB_TUTF8E} EXCLUDE_FROM_ALL)
+endif()
+
+# simdutf
+if(FLB_UNICODE_ENCODER)
+  enable_language(CXX)
+  set (CMAKE_CXX_STANDARD 11)
+  add_subdirectory(${FLB_PATH_LIB_SIMDUTF} EXCLUDE_FROM_ALL)
+  FLB_DEFINITION(FLB_HAVE_UNICODE_ENCODER)
 endif()
 
 # snappy
@@ -683,8 +770,17 @@ if (FLB_SIGNV4)
 endif()
 
 if(FLB_SQLDB)
+  if(FLB_PREFER_SYSTEM_LIB_SQLITE)
+    find_package(PkgConfig)
+    pkg_check_modules(SQLITE sqlite3>=3.0.0)
+  endif()
+  if(SQLITE_FOUND)
+    include_directories(${SQLITE_INCLUDE_DIRS})
+    link_directories(${SQLITE_LIBRARY_DIRS})
+  else()
+    include(cmake/sqlite.cmake)
+  endif()
   FLB_DEFINITION(FLB_HAVE_SQLDB)
-  add_subdirectory(${FLB_PATH_LIB_SQLITE})
 endif()
 
 if(FLB_TRACE)
@@ -1022,16 +1118,19 @@ if(FLB_BACKTRACE)
   FLB_DEFINITION(FLB_HAVE_LIBBACKTRACE)
 endif()
 
-if(FLB_IN_KAFKA OR FLB_OUT_KAFKA)
-  if(FLB_PREFER_SYSTEM_LIB_KAFKA)
-    find_package(PkgConfig)
-    pkg_check_modules(KAFKA rdkafka>=2.3.0)
-  endif()
-  if(KAFKA_FOUND)
-    include_directories(${KAFKA_INCLUDE_DIRS})
-    link_directories(${KAFKA_LIBRARY_DIRS})
-  else()
-    include(cmake/kafka.cmake)
+# Kafka support (library in general)
+if(FLB_KAFKA)
+  if(FLB_IN_KAFKA OR FLB_OUT_KAFKA)
+    if(FLB_PREFER_SYSTEM_LIB_KAFKA)
+      find_package(PkgConfig)
+      pkg_check_modules(KAFKA rdkafka>=2.3.0)
+    endif()
+    if(KAFKA_FOUND)
+      include_directories(${KAFKA_INCLUDE_DIRS})
+      link_directories(${KAFKA_LIBRARY_DIRS})
+    else()
+      include(cmake/kafka.cmake)
+    endif()
   endif()
 endif()
 
@@ -1101,6 +1200,32 @@ endif()
 # ============
 if (FLB_IN_EBPF)
   find_package(PkgConfig)
+
+  # Check for Clang compiler
+  find_program(CLANG_EXECUTABLE clang)
+
+  if (CLANG_EXECUTABLE)
+    message(STATUS "Clang found: ${CLANG_EXECUTABLE}")
+    # Get Clang version
+    execute_process(
+            COMMAND ${CLANG_EXECUTABLE} --version
+            OUTPUT_VARIABLE CLANG_VERSION_OUTPUT
+            ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if (CLANG_VERSION_OUTPUT MATCHES "clang version ([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+      set(CLANG_VERSION_MAJOR "${CMAKE_MATCH_1}")
+      set(CLANG_VERSION_MINOR "${CMAKE_MATCH_2}")
+      set(CLANG_VERSION_PATCH "${CMAKE_MATCH_3}")
+
+      message(STATUS "Detected Clang version: ${CLANG_VERSION_MAJOR}.${CLANG_VERSION_MINOR}.${CLANG_VERSION_PATCH}")
+      # Check if Clang version is at least 3.7.0
+      if (CLANG_VERSION_MAJOR LESS 3 AND CLANG_VERSION_MINOR LESS 7)
+        message(FATAL_ERROR "Clang version must be at least 3.7.0, but found ${CLANG_VERSION_MAJOR}.${CLANG_VERSION_MINOR}.${CLANG_VERSION_PATCH}")
+      endif()
+    endif()
+  else()
+    message(FATAL_ERROR "Clang not found! Please install Clang version >= 3.7.0!")
+  endif()
 
   # Check for libbpf with pkg-config
   pkg_check_modules(LIBBPF libbpf>=0.5.0)

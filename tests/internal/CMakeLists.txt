@@ -18,6 +18,7 @@ set(UNIT_TESTS_FILES
   http_client.c
   utils.c
   gzip.c
+  zstd.c
   random.c
   config_map.c
   mp.c
@@ -41,10 +42,12 @@ set(UNIT_TESTS_FILES
   log_event_decoder.c
   log_event_encoder.c
   processor.c
+  processor_conditional.c
   uri.c
   msgpack_append_message.c
   conditionals.c
-  endianness
+  endianness.c
+  task_map.c
   )
 
 # Config format

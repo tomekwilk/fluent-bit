@@ -183,6 +183,11 @@ struct flb_service_config service_configs[] = {
      offsetof(struct flb_config, enable_chunk_trace)},
 #endif
 
+#ifdef FLB_SYSTEM_WINDOWS
+    {FLB_CONF_STR_WINDOWS_MAX_STDIO,
+     FLB_CONF_TYPE_INT,
+     offsetof(struct flb_config, win_maxstdio)},
+#endif
     {FLB_CONF_STR_HOT_RELOAD,
      FLB_CONF_TYPE_BOOL,
      offsetof(struct flb_config, enable_hot_reload)},
@@ -274,6 +279,9 @@ struct flb_config *flb_config_init()
         }
     }
 
+    /* Routing */
+    flb_routes_mask_set_size(1, config);
+
     config->cio          = NULL;
     config->storage_path = NULL;
     config->storage_input_plugin = NULL;
@@ -287,6 +295,10 @@ struct flb_config *flb_config_init()
     config->hot_reloaded_count = 0;
     config->shutdown_by_hot_reloading = FLB_FALSE;
     config->hot_reloading = FLB_FALSE;
+
+#ifdef FLB_SYSTEM_WINDOWS
+    config->win_maxstdio = 512;
+#endif
 
 #ifdef FLB_HAVE_SQLDB
     mk_list_init(&config->sqldb_list);
@@ -333,12 +345,19 @@ struct flb_config *flb_config_init()
     mk_list_init(&config->cmetrics);
     mk_list_init(&config->cf_parsers_list);
 
-    memset(&config->tasks_map, '\0', sizeof(config->tasks_map));
-
     /* Initialize multiline-parser list. We need this here, because from now
      * on we use flb_config_exit to cleanup the config, which requires
      * the config->multiline_parsers list to be initialized. */
     mk_list_init(&config->multiline_parsers);
+
+    /* Task map */
+    ret = flb_config_task_map_resize(config, FLB_CONFIG_DEFAULT_TASK_MAP_SIZE);
+
+    if (ret != 0) {
+        flb_error("[config] task map resize failed");
+        flb_config_exit(config);
+        return NULL;
+    }
 
     /* Environment */
     config->env = flb_env_create();
@@ -546,6 +565,10 @@ void flb_config_exit(struct flb_config *config)
         mk_list_del(&cf->_head);
         flb_cf_destroy(cf);
     }
+
+    /* release task map */
+    flb_config_task_map_resize(config, 0);
+    flb_routes_empty_mask_destroy(config);
 
     flb_free(config);
 }
@@ -850,10 +873,16 @@ static int configure_plugins_type(struct flb_config *config, struct flb_cf *cf, 
         processors = flb_cf_group_get(cf, s, "processors");
         if (processors) {
             if (type == FLB_CF_INPUT) {
-                flb_processors_load_from_config_format_group(((struct flb_input_instance *) ins)->processor, processors);
+                ret = flb_processors_load_from_config_format_group(((struct flb_input_instance *) ins)->processor, processors);
+                if (ret == -1) {
+                    return -1;
+                }
             }
             else if (type == FLB_CF_OUTPUT) {
-                flb_processors_load_from_config_format_group(((struct flb_output_instance *) ins)->processor, processors);
+                ret = flb_processors_load_from_config_format_group(((struct flb_output_instance *) ins)->processor, processors);
+                if (ret == -1) {
+                    return -1; 
+                }
             }
             else {
                 flb_error("[config] section '%s' does not support processors", s_type);
@@ -969,4 +998,58 @@ int flb_config_load_config_format(struct flb_config *config, struct flb_cf *cf)
     }
 
     return 0;
+}
+
+int flb_config_task_map_resize(struct flb_config *config, size_t new_size)
+{
+    struct flb_task_map *new_task_map;
+
+    if (new_size == config->task_map_size) {
+        return 0;
+    }
+
+    if (new_size == 0) {
+        if (config->task_map != NULL) {
+            flb_free(config->task_map);
+
+            config->task_map = NULL;
+            config->task_map_size = 0;
+        }
+
+        return 0;
+    }
+
+    if (config->task_map == NULL) {
+        new_task_map = flb_calloc(new_size, sizeof(struct flb_task_map));
+    }
+    else {
+        new_task_map = flb_realloc(config->task_map, new_size * sizeof(struct flb_task_map));
+    }
+
+    if (new_task_map == NULL) {
+        flb_errno();
+
+        return -1;
+    }
+
+    if (new_size > config->task_map_size) {
+        memset(&new_task_map[config->task_map_size],
+               0,
+               (new_size - config->task_map_size) * sizeof(struct flb_task_map));
+    }
+
+    config->task_map = new_task_map;
+    config->task_map_size = new_size;
+
+    return 0;
+}
+
+int flb_config_task_map_grow(struct flb_config *config)
+{
+    if (config->task_map_size >= FLB_CONFIG_DEFAULT_TASK_MAP_SIZE_LIMIT) {
+        return -1;
+    }
+
+    return flb_config_task_map_resize(config,
+                                      config->task_map_size + FLB_CONFIG_DEFAULT_TASK_MAP_SIZE_GROWTH_SiZE);
 }
