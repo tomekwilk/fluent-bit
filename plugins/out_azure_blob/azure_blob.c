@@ -30,6 +30,8 @@
 #include <fluent-bit/flb_log_event_decoder.h>
 #include <fluent-bit/flb_plugin.h>
 #include <fluent-bit/flb_notification.h>
+#include <fluent-bit/flb_record_accessor.h>
+#include <fluent-bit/flb_ra_key.h>
 
 #include <msgpack.h>
 
@@ -54,9 +56,10 @@ FLB_TLS_DEFINE(struct worker_info, worker_info);
 static flb_sds_t cb_azb_msgpack_extract_log_key(void *out_context, const char *data,
                                                 uint64_t bytes)
 {
-    struct flb_out_azure_blob *ctx = out_context;
+    struct flb_azure_blob *ctx = out_context;
     msgpack_unpacked result;
-
+    flb_sds_t out_buf;
+    
     /* Initialize msgpack_unpacked */
     msgpack_unpacked_init(&result);
 
@@ -66,7 +69,7 @@ static flb_sds_t cb_azb_msgpack_extract_log_key(void *out_context, const char *d
     msgpack_object obj_map = result.data;
 
     struct flb_record_accessor *ra;
-    ra = flb_ra_create(ctx->ins, ctx->log_key, FLB_RECORD_ACCESSOR_STRING);
+    ra = flb_ra_create(ctx->log_key, FLB_FALSE);
     if (!ra) {
         flb_plg_error(ctx->ins, "invalid record accessor pattern '%s'", ctx->log_key);
         flb_errno();
@@ -84,14 +87,22 @@ static flb_sds_t cb_azb_msgpack_extract_log_key(void *out_context, const char *d
         return NULL;
     }
 
+    if (rval->type != FLB_RA_STRING) {
+        flb_plg_error(ctx->ins, "field 'log_key' is not a string (type: '%d')", rval->type);
+        flb_ra_key_value_destroy(rval);
+        flb_ra_destroy(ra);
+        msgpack_unpacked_destroy(&result);
+        return NULL;
+    }
+    
     /* Create output buffer to store contents */
-    out_buf = flb_sds_create(rval->value.v_str.ptr);
+    out_buf = flb_sds_create_len(rval->o.via.str.ptr, rval->o.via.str.size);
     if (out_buf == NULL) {
-        flb_plg_error(ctx->ins, "Error creating buffer to store log_key contents.");
+        flb_plg_error(ctx->ins, "could not allocate output buffer");
         flb_errno();
     }
-    flb_free(val_buf);
-    flb_ra_key_value_destroy(ra);
+
+    flb_ra_key_value_destroy(rval);
     flb_ra_destroy(ra);
     msgpack_unpacked_destroy(&result);
 
