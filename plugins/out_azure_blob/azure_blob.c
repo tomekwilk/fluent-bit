@@ -54,153 +54,46 @@ FLB_TLS_DEFINE(struct worker_info, worker_info);
 static flb_sds_t cb_azb_msgpack_extract_log_key(void *out_context, const char *data,
                                                 uint64_t bytes)
 {
-    int i;
-    int records = 0;
-    int map_size;
-    int check = FLB_FALSE;
-    int found = FLB_FALSE;
-    int log_key_missing = 0;
-    int ret;
-    int alloc_error = 0;
-    struct flb_azure_blob *ctx = out_context;
-    char *val_buf;
-    char *key_str = NULL;
-    size_t key_str_size = 0;
-    size_t msgpack_size = bytes + bytes / 4;
-    size_t val_offset = 0;
-    flb_sds_t out_buf;
-    msgpack_object map;
-    msgpack_object key;
-    msgpack_object val;
-    struct flb_log_event_decoder log_decoder;
-    struct flb_log_event log_event;
+    struct flb_out_azure_blob *ctx = out_context;
+    msgpack_unpacked result;
 
-    /* Iterate the original buffer and perform adjustments */
-    records = flb_mp_count(data, bytes);
-    if (records <= 0) {
-        return NULL;
-    }
+    /* Initialize msgpack_unpacked */
+    msgpack_unpacked_init(&result);
 
-    /* Allocate buffer to store log_key contents */
-    val_buf = flb_calloc(1, msgpack_size);
-    if (val_buf == NULL) {
-        flb_plg_error(ctx->ins, "Could not allocate enough "
-                      "memory to read record");
+    size_t off = 0;
+    /* Unpack the data */
+    msgpack_unpack_next(&result, data, bytes, &off);
+    msgpack_object obj_map = result.data;
+
+    struct flb_record_accessor *ra;
+    ra = flb_ra_create(ctx->ins, ctx->log_key, FLB_RECORD_ACCESSOR_STRING);
+    if (!ra) {
+        flb_plg_error(ctx->ins, "invalid record accessor pattern '%s'", ctx->log_key);
         flb_errno();
+        msgpack_unpacked_destroy(&result);
         return NULL;
     }
 
-    ret = flb_log_event_decoder_init(&log_decoder, (char *) data, bytes);
-
-    if (ret != FLB_EVENT_DECODER_SUCCESS) {
-        flb_plg_error(ctx->ins,
-                      "Log event decoder initialization error : %d", ret);
-
-        flb_free(val_buf);
-
+    struct flb_ra_value *rval;
+    rval = flb_ra_get_value_object(ra, obj_map);
+    if (!rval) {
+        flb_plg_error(ctx->ins, "could not find field '%s'", "log_key");
+        flb_errno();
+        flb_ra_destroy(ra);
+        msgpack_unpacked_destroy(&result);
         return NULL;
     }
-
-
-    while (!alloc_error &&
-           (ret = flb_log_event_decoder_next(
-                    &log_decoder,
-                    &log_event)) == FLB_EVENT_DECODER_SUCCESS) {
-
-        /* Get the record/map */
-        map = *log_event.body;
-
-        if (map.type != MSGPACK_OBJECT_MAP) {
-            continue;
-        }
-
-        map_size = map.via.map.size;
-
-        /* Reset variables for found log_key and correct type */
-        found = FLB_FALSE;
-        check = FLB_FALSE;
-
-        /* Extract log_key from record and append to output buffer */
-        for (i = 0; i < map_size; i++) {
-            key = map.via.map.ptr[i].key;
-            val = map.via.map.ptr[i].val;
-
-            if (key.type == MSGPACK_OBJECT_BIN) {
-                key_str  = (char *) key.via.bin.ptr;
-                key_str_size = key.via.bin.size;
-                check = FLB_TRUE;
-            }
-            if (key.type == MSGPACK_OBJECT_STR) {
-                key_str  = (char *) key.via.str.ptr;
-                key_str_size = key.via.str.size;
-                check = FLB_TRUE;
-            }
-
-            if (check == FLB_TRUE) {
-                if (strncmp(ctx->log_key, key_str, key_str_size) == 0) {
-                    found = FLB_TRUE;
-
-                    /*
-                     * Copy contents of value into buffer. Necessary to copy
-                     * strings because flb_msgpack_to_json does not handle nested
-                     * JSON gracefully and double escapes them.
-                     */
-                    if (val.type == MSGPACK_OBJECT_BIN) {
-                        memcpy(val_buf + val_offset, val.via.bin.ptr, val.via.bin.size);
-                        val_offset += val.via.bin.size;
-                        val_buf[val_offset] = '\n';
-                        val_offset++;
-                    }
-                    else if (val.type == MSGPACK_OBJECT_STR) {
-                        memcpy(val_buf + val_offset, val.via.str.ptr, val.via.str.size);
-                        val_offset += val.via.str.size;
-                        val_buf[val_offset] = '\n';
-                        val_offset++;
-                    }
-                    else {
-                        ret = flb_msgpack_to_json(val_buf + val_offset,
-                                                  msgpack_size - val_offset, &val);
-                        if (ret < 0) {
-                            break;
-                        }
-                        val_offset += ret;
-                        val_buf[val_offset] = '\n';
-                        val_offset++;
-                    }
-                    /* Exit early once log_key has been found for current record */
-                    break;
-                }
-            }
-        }
-
-        /* If log_key was not found in the current record, mark log key as missing */
-        if (found == FLB_FALSE) {
-            log_key_missing++;
-        }
-    }
-
-    /* Throw error once per chunk if at least one log key was not found */
-    if (log_key_missing > 0) {
-        flb_plg_error(ctx->ins, "Could not find log_key '%s' in %d records",
-                      ctx->log_key, log_key_missing);
-    }
-
-    flb_log_event_decoder_destroy(&log_decoder);
-
-    /* If nothing was read, destroy buffer */
-    if (val_offset == 0) {
-        flb_free(val_buf);
-        return NULL;
-    }
-    val_buf[val_offset] = '\0';
 
     /* Create output buffer to store contents */
-    out_buf = flb_sds_create(val_buf);
+    out_buf = flb_sds_create(rval->value.v_str.ptr);
     if (out_buf == NULL) {
         flb_plg_error(ctx->ins, "Error creating buffer to store log_key contents.");
         flb_errno();
     }
     flb_free(val_buf);
+    flb_ra_key_value_destroy(ra);
+    flb_ra_destroy(ra);
+    msgpack_unpacked_destroy(&result);
 
     return out_buf;
 }
