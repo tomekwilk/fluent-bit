@@ -58,16 +58,10 @@ static flb_sds_t cb_azb_msgpack_extract_log_key(void *out_context, const char *d
 {
     struct flb_azure_blob *ctx = out_context;
     msgpack_unpacked result;
+    msgpack_object root;
+    msgpack_object map;
     flb_sds_t out_buf;
     
-    /* Initialize msgpack_unpacked */
-    msgpack_unpacked_init(&result);
-
-    size_t off = 0;
-    /* Unpack the data */
-    msgpack_unpack_next(&result, data, bytes, &off);
-    msgpack_object obj_map = result.data;
-
     struct flb_record_accessor *ra;
     ra = flb_ra_create(ctx->log_key, FLB_FALSE);
     if (!ra) {
@@ -77,32 +71,49 @@ static flb_sds_t cb_azb_msgpack_extract_log_key(void *out_context, const char *d
         return NULL;
     }
 
-    struct flb_ra_value *rval;
-    rval = flb_ra_get_value_object(ra, obj_map);
-    if (!rval) {
-        flb_plg_error(ctx->ins, "could not find field '%s'", "log_key");
-        flb_errno();
-        flb_ra_destroy(ra);
-        msgpack_unpacked_destroy(&result);
-        return NULL;
-    }
-
-    if (rval->type != FLB_RA_STRING) {
-        flb_plg_error(ctx->ins, "field 'log_key' is not a string (type: '%d')", rval->type);
-        flb_ra_key_value_destroy(rval);
-        flb_ra_destroy(ra);
-        msgpack_unpacked_destroy(&result);
-        return NULL;
-    }
+    size_t off = 0;
+    int found = FLB_FALSE;
     
-    /* Create output buffer to store contents */
-    out_buf = flb_sds_create_len(rval->o.via.str.ptr, rval->o.via.str.size);
-    if (out_buf == NULL) {
-        flb_plg_error(ctx->ins, "could not allocate output buffer");
-        flb_errno();
+    /* Unpack the data */
+    msgpack_unpacked_init(&result);
+    while (msgpack_unpack_next(&result, data, bytes, &off) ==
+           MSGPACK_UNPACK_SUCCESS) {
+        root = result.data;
+        if (root.type != MSGPACK_OBJECT_ARRAY) {
+            continue;
+        }
+
+        map = root.via.array.ptr[1];
+
+        struct flb_ra_value *rval;
+        rval = flb_ra_get_value_object(ra, map);
+        if (!rval) {
+            flb_plg_error(ctx->ins, "could not find field '%s'", ctx->log_key);
+            msgpack_unpacked_destroy(&result);
+            continue;
+        }
+
+        found = FLB_TRUE;
+        
+        if (rval->type != FLB_RA_STRING) {
+            flb_plg_error(ctx->ins, "field 'log_key' is not a string (type: '%d')", rval->type);
+            flb_ra_key_value_destroy(rval);
+            msgpack_unpacked_destroy(&result);
+            break;
+        }
+    
+        /* Create output buffer to store contents */
+        out_buf = flb_sds_create_len(rval->o.via.str.ptr, rval->o.via.str.size);
+        if (out_buf == NULL) {
+            flb_plg_error(ctx->ins, "could not allocate output buffer");
+            flb_errno();
+        }
+
+        flb_ra_key_value_destroy(rval);
+
     }
 
-    flb_ra_key_value_destroy(rval);
+
     flb_ra_destroy(ra);
     msgpack_unpacked_destroy(&result);
 
